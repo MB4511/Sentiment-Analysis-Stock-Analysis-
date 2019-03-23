@@ -1,0 +1,234 @@
+##sentiment analysis of stocks (29 jan- 5 feb 2019)
+
+#read the file (use read_csv)(doesnt convert char into factors)
+
+library(tidyverse)
+dataset <- read_csv("stocks6feb.csv",col_names = c("company","site","date","headline","link","text"))
+
+#analyze data
+
+str(dataset)
+names(dataset)
+
+#make data tidy
+#subset of data with required columns for sentiment analysis
+library(dplyr)
+df_id <- dataset %>%
+  mutate(ID = row_number()) %>% 
+  select(ID, company,date, text,link)
+  
+#tokenization using unnest_tokens
+
+library(tidytext)
+df_tidy <- df_id %>%
+  unnest_tokens(word,text)
+df_tidy
+
+#check for stopwords (1149 stopwords in smart lexicon)
+
+data(stop_words)
+tail(stop_words, 20)
+
+#using anti join to give words in articles which are not a part of stopwords 
+df_tidy <- df_tidy %>%
+  anti_join(stop_words, by = "word")
+df_tidy
+
+#frequency of words in the articles
+
+df_tidy %>%
+  count(word, sort=TRUE)
+  
+#grouping the most frequent words by company
+df_tidy %>%
+  group_by(company) %>%
+  count(word, sort = TRUE)
+  
+##plot the most overall common words. 
+library(ggplot2)
+# Create a dataframe woth count
+df_count <- df_tidy %>%
+  count(word, sort=TRUE) %>% 
+  head(20)
+df_count
+
+ggplot(data = df_count, aes(x = reorder(word, -n), y = n))+
+  geom_col(fill = "red")+
+  coord_flip()+
+  xlab(NULL)+
+  ylab("word count")
+  
+##wordcloud
+install.packages("wordcloud")
+library(wordcloud)
+df_tidy %>% 
+  count(word) %>% 
+  with(wordcloud(word,n, max.words = 100,color = "black"))
+  
+## Sentiment analysis, one-gram
+sentiments
+unique(sentiments$lexicon)
+
+##using bing and loughran lexicons for the sentiment analysis
+#bing has 6788 words with positive or negative sentiments 
+bing <- get_sentiments("bing")
+bing
+
+#performing an inner join from our dataset to the bing lexicon 
+df_sentiment <- df_tidy %>%
+  inner_join(bing, by = "word")
+df_sentiment
+agg11<-aggregate(df_sentiment,by=list(df_sentiment$sentiment),FUN=length)
+agg11 ##### positive sentiments are 20345, negative sentiments are 18816 
+
+## grouping sentiments by each article(ID) for each company 
+
+df_pos_neg <- df_sentiment %>% 
+  group_by(ID, company) %>% 
+  count(sentiment)
+df_pos_neg
+
+##Spread the data so positive and negative are their own column. 
+
+df_spread <- df_pos_neg %>% 
+  spread(sentiment, n)
+df_spread
+
+##Calculate net sentiment for each article by simply taking the difference in the number of positive and negative words devided by their sum for normalization. 
+df_net_article <- df_spread %>% 
+  mutate(net = (positive-negative)/(positive+negative))
+df_net_article
+
+##Calculate net sentiment per company over all the articles for that particular time period. 
+
+bing_net <-df_net_article %>% 
+  group_by(company) %>% 
+  summarise(net_overall = mean(net, na.rm = TRUE)) %>% 
+  arrange(net_overall)
+bing_net %>% head(20)
+bing_net %>% tail(20)
+
+## Loughran: finance lexicon (better for stock analysis as recognizes sentiments from finance world)
+loughran <- get_sentiments("loughran")
+dim(loughran)
+df_loughran <- df_tidy %>% 
+  inner_join(loughran)
+df_loughran
+
+df_loughran_senti <- df_loughran %>% 
+  group_by(ID, company) %>% 
+  count(sentiment) %>% 
+  spread(sentiment, n) %>% 
+  replace_na(list(positive = 0, positive = "unknown")) %>% 
+  replace_na(list(negative = 0, negative = "unknown")) %>% 
+  ungroup()
+df_loughran_senti
+
+##Lets select only the positive and negative sentiments 
+
+loughran_pos_neg <- df_loughran_senti %>% 
+  select(ID, company, positive, negative)
+loughran_pos_neg
+
+loughran_pos_neg <- loughran_pos_neg %>% 
+  mutate(net = (positive - negative)/(positive+negative))
+
+loughran_pos_neg
+
+
+##Combine it with original data
+
+df_final <- loughran_pos_neg %>% 
+  left_join(df_id, by = "ID")
+df_final
+
+
+
+##Calculate the net score
+
+loughran_net <- loughran_pos_neg %>% 
+  group_by(company) %>% 
+  summarise(net_loughran = mean(net, na.rm = TRUE)) %>% 
+  arrange(net_loughran)
+loughran_net
+
+## needed columns : company ,positive total, negative total,net score, no of articles
+loughran_pos_neg %>% 
+  ##getting sum of positive sentiments for each company 
+  agg14<-aggregate(loughran_pos_neg$positive,by=list(loughran_pos_neg$company),FUN=sum)
+agg14
+## getting sum of negative sentiments for each company
+agg15<-aggregate(loughran_pos_neg$negative,by=list(loughran_pos_neg$company),FUN=sum)
+agg15
+##using inner join to club the pos and neg sentiments
+posneg<-inner_join(x=agg14,y=agg15,by=c('Group.1'))
+##using inner join to get the net score from loughran_net
+posnegnet<-inner_join(x=posneg,y=loughran_net,by=c('Group.1'='company'))
+posnegnet
+#add a column id to make sure length of id = no of records
+loughran_pos_neg1<-select(loughran_pos_neg,-1)
+loughran_pos_neg_updated<-mutate(loughran_pos_neg1,id=(1:1213))
+##finding number of articles for each company
+agg16<-aggregate(loughran_pos_neg_updated$id,by=list(loughran_pos_neg_updated$company),FUN=length)
+agg16
+##adding the col of num of articles to the posnegnet dataframe
+loughran_updated<-mutate(posnegnet,num_of_articles=agg16$x)
+##renaming column names for posnegnet
+colnames(loughran_updated)<-c('company','positive','negative','net score','no of articles')
+loughran_updated
+
+##vector of all the tickers
+tickers<-c('AET','AAPL','ABBV','ABT','ACN','ADBE','ADP','AGN','AMGN','AMT','AMZN','ANTM','AVGO','AXP','BA','BAC','BDX','BIIB','BKNG' ,'BLK','BMY','C','CAT','CB','CELG','CHTR','CMCSA','COP','COST','CRM','CSCO','CSX','CVS','CVX','DHR','DIS','DWDP','EOG','FB','FDX','FOXA','GE','GILD','GOOGL','GS','HD','HON','IBM','INTC','JNJ','JPM','KHC','KO','LLY','LMT','LOW','MA','MCD','MDLZ','MDT','MMM','MO','MRK','MS','MSFT','MU','NEE','NFLX','NKE','NVDA','ORCL','OXY','PEP','PFE','PG','PM','PNC','PYPL','QCOM','SBUX','SCHW','SLB','SPG','SYK','T','TJX','TJX','TMO','TXN','UNH','UNP','UPS','USB','UTX','V','VZ','WBA','WFC','WMT','XOM')
+df<-data.frame(tickers)
+length(tickers)
+##companies without any articles
+left<-setdiff(df$tickers,loughran_updated$company)
+
+scrapedcmpa<-loughran_updated$company
+length(scrapedcmp)
+
+aaa<-match(df$tickers,loughran_updated$company)
+aaa[1]
+for(i in 1:nrow(loughran_updated)){
+  if (loughran_updated$company==df$tickers) {
+    loughran_updated$status<-paste0("yes")
+  } else {
+    loughran_updated$status<-paste0('no') 
+  }
+}
+
+res <- rep(0, length(loughran_updated$company))
+where <- match( names(df$tickers), names(loughran_updated$company) )
+res[ where ] <- ili / no.ili[where]
+names(res) <- names(no.ili)
+res
+
+for (i in 1:length(df$tickers)) {
+  if (df$tickers[i] %in% loughran_updated$company) {
+    loughran_updated$status<-paste0('yes')
+  } else {
+    loughran_updated$status[i]<-0
+  }
+}
+
+
+m <- "intialize" # initialize, sometimes better as just `list()`
+for(i in 1:nrow(g)){
+  if(g[i,2]=='No'){
+    # paste into position i of vector m
+    m[i] <- paste0("ABC", g[i,1], "DEF", g[i,2], "GHI", g[i,3],"\n") 
+  } else if(g[i,2]=='Yes'){
+    # paste into position i of vector m
+    m[i] <- paste0("ABC", g[i,1], "DEF", g[i,2], "GHI", g[i,3],"\n")
+  } else {
+    NULL
+  }
+}
+m
+
+z1<-mutate(df,company=loughran_updated$company,na.rm='true')
+
+left<-setdiff(df$tickers,loughran_updated$company)
+
+
+z<-df[!(df$tickers%in% loughran_updated$company)]
